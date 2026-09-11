@@ -1,0 +1,6 @@
+flask
+apscheduler
+numpy
+pillow
+requests
+scikit-image

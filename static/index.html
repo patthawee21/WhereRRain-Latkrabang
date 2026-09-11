@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>แจ้งเตือนฝนใกล้เข้ามา</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
+  #map { height: 55vh; width: 100%; }
+  .panel { padding: 16px 20px; }
+  .status { border-radius: 12px; padding: 16px; margin-bottom: 12px; font-size: 15px; line-height: 1.5; }
+  .ok      { background:#064e3b; border:1px solid #10b981; }
+  .warn    { background:#78350f; border:1px solid #f59e0b; }
+  .alert   { background:#7f1d1d; border:1px solid #ef4444; }
+  .meta { font-size: 13px; color:#94a3b8; margin-top: 6px; }
+  button { background:#2563eb; color:white; border:none; padding:8px 14px; border-radius:8px; cursor:pointer; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; font-size:12px; }
+  .legend span { display:flex; align-items:center; gap:5px; }
+  .legend i { width:12px; height:12px; border-radius:3px; display:inline-block; }
+</style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel">
+    <h1>สถานะฝนบริเวณตำแหน่งของคุณ</h1>
+    <div id="status" class="status warn">กำลังโหลดข้อมูล...</div>
+    <div id="legend" class="legend"></div>
+    <button onclick="refreshNow()">รีเฟรชตอนนี้</button>
+  </div>
+
+<script>
+let map, userMarker, shapeLayer;
+
+const LEVELS = [
+  { level: 15, color: "#00c853", label: "ฝนเบามาก" },
+  { level: 25, color: "#64dd17", label: "ฝนเบา" },
+  { level: 35, color: "#ffd600", label: "ฝนปานกลาง" },
+  { level: 45, color: "#ff9100", label: "ฝนแรง" },
+  { level: 55, color: "#ff1744", label: "ฝนแรงมาก" },
+  { level: 63, color: "#e040fb", label: "พายุรุนแรง" },
+];
+
+function renderLegend() {
+  document.getElementById('legend').innerHTML = LEVELS.map(l =>
+    `<span><i style="background:${l.color}"></i>${l.label} (${l.level}+ dBZ)</span>`
+  ).join('');
+}
+renderLegend();
+
+function initMap(lat, lon) {
+  map = L.map('map').setView([lat, lon], 9);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+  userMarker = L.marker([lat, lon]).addTo(map).bindPopup("ตำแหน่งของคุณ");
+}
+
+function renderShapes(geojson) {
+  if (shapeLayer) { map.removeLayer(shapeLayer); shapeLayer = null; }
+  if (!geojson || !geojson.features || geojson.features.length === 0) return;
+
+  // วาดจากระดับอ่อนไปแรง (อ่อน=ใหญ่กว่าวาดก่อน, แรง=เล็กกว่าวาดทับด้านบน) ให้เห็นเป็นชั้นเหมือนภาพเรดาร์จริง
+  const sorted = [...geojson.features].sort((a, b) => a.properties.level_dbz - b.properties.level_dbz);
+  shapeLayer = L.geoJSON({ type: "FeatureCollection", features: sorted }, {
+    style: (feature) => ({
+      color: feature.properties.color,
+      weight: 1,
+      fillColor: feature.properties.color,
+      fillOpacity: feature.properties.opacity,
+    }),
+    onEachFeature: (feature, layer) => {
+      const p = feature.properties;
+      layer.bindPopup(`ระดับ ${p.level_dbz} dBZ ขึ้นไป — พื้นที่รวมประมาณ ${p.area_km2} ตร.กม.`);
+    },
+  }).addTo(map);
+}
+
+function renderStatus(data) {
+  const el = document.getElementById('status');
+  if (!data.summary) {
+    el.className = 'status ok';
+    el.innerHTML = '✅ ไม่พบกลุ่มฝนในรัศมีตรวจสอบ' +
+      `<div class="meta">อัปเดตล่าสุด: ${new Date(data.timestamp).toLocaleString('th-TH')}</div>`;
+    renderShapes(null);
+    return;
+  }
+
+  const s = data.summary;
+  const m = data.motion;
+  let cls = 'warn';
+  let text = `☁️ พบกลุ่มฝนห่างออกไป ${s.nearest_km} กม. (ความแรงสูงสุด ${s.max_dbz} dBZ, ` +
+    `ครอบคลุมพื้นที่ประมาณ ${s.total_area_km2 ?? '-'} ตร.กม.)`;
+
+  if (data.alert) {
+    cls = 'alert';
+    text = `🌧️ ${data.alert_message}<div class="meta">ครอบคลุมพื้นที่ประมาณ ${s.total_area_km2 ?? '-'} ตร.กม.</div>`;
+  }
+  if (m) {
+    text += `<div class="meta">กลุ่มฝนเคลื่อนที่ ~${m.cell_speed_kmh} กม./ชม. ` +
+      (m.approaching ? 'กำลังเข้าใกล้' : 'กำลังห่างออก') + '</div>';
+  }
+  text += `<div class="meta">อัปเดตล่าสุด: ${new Date(data.timestamp).toLocaleString('th-TH')}</div>`;
+
+  el.className = 'status ' + cls;
+  el.innerHTML = text;
+
+  renderShapes(data.shape_geojson);
+}
+
+async function loadStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    if (!map) initMap(data.user_lat ?? 13.7563, data.user_lon ?? 100.5018);
+    if (res.ok) renderStatus(data);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function refreshNow() {
+  document.getElementById('status').innerHTML = 'กำลังตรวจสอบ...';
+  const res = await fetch('/api/refresh', { method: 'POST' });
+  const data = await res.json();
+  renderStatus(data);
+}
+
+loadStatus();
+setInterval(loadStatus, 60_000); // เช็คทุก 1 นาที (ข้อมูลจริงอัปเดตทุก 10 นาทีตาม scheduler)
+</script>
+</body>
+</html>
